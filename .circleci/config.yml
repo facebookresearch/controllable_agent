@@ -1,0 +1,122 @@
+# Python CircleCI 2.0 configuration file
+#
+# Check https://circleci.com/docs/2.0/language-python/ for more details
+#
+version: 2.1
+
+
+executors:
+  ubuntu-python:
+    docker:
+      - image: cimg/python:3.8
+    working_directory: ~/repo
+
+
+commands:
+
+  ubuntu_restore_all:
+    description: "Restores virtual env with full install from cache, and update dependencies if need be."
+    steps:
+      - checkout
+
+      - restore_cache:
+          name: "Restore cache"
+          keys:
+          - v0-dependencies-main-{{ checksum "requirements.txt"}}
+
+      - run:
+          name: "Install dependencies"
+          command: |
+            source env.sh install
+            sudo apt-get update
+            # sudo apt-get install libosmesa6-dev freeglut3-dev libgl1-mesa-glx libegl1
+            sudo apt-get install libosmesa6 freeglut3-dev libegl1
+
+       # cache is saved only in the pytest step
+
+
+jobs:
+
+  static:
+    executor: ubuntu-python
+
+    steps:
+
+      - ubuntu_restore_all
+
+      - run:
+          name: "Print directories"
+          command: |
+            echo "# Pwd"
+            pwd
+            echo "# Home"
+            echo ~
+            echo "# Content"
+            ls -a .
+            echo "# Mujoco"
+            ls ~/.mujoco
+            echo "# Venvs"
+            ls ~/.venvs
+
+      - run:
+          name: "Print pip freeze"
+          command: |
+            source env.sh activate
+            pip freeze
+
+      - run:
+          name: "Run mypy"
+          when: always
+          command: |
+            source env.sh activate
+            mypy --version
+            mypy controllable_agent
+            mypy url_benchmark
+
+      - run:
+          name: "Run basic pylint"
+          when: always
+          command: |
+            source env.sh activate
+            pylint --version
+            # readd unused-argument from enabled list
+            pylint controllable_agent url_benchmark --disable=all --enable=unused-import,unused-variable,undefined-loop-variable,redefined-builtin,used-before-assignment,super-init-not-called,useless-super-delegation,dangerous-default-value,unnecessary-pass,attribute-defined-outside-init
+
+      - run:
+          name: "Run black"
+          when: always
+          command: |
+            source env.sh activate
+            black --version
+            black controllable_agent --check
+
+
+  pytests:
+    executor: ubuntu-python
+
+    steps:
+
+      - ubuntu_restore_all
+
+      - save_cache:
+          name: "Save cache"
+          paths:
+            - ~/.venvs/ca  # makefile installs venv here
+            - ~/.mujoco  # makefile installs mujoco here
+          key: v0-dependencies-main-{{ checksum "requirements.txt"}}
+
+      - run:
+          name: "Run pytest"
+          when: always
+          command: |
+            source env.sh activate
+            pytest controllable_agent -v --durations=20 --cov=controllable_agent
+            pytest url_benchmark -vs --durations=20
+
+
+workflows:
+  version: 2
+  all_ci:
+    jobs:
+      - static
+      - pytests

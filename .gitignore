@@ -1,0 +1,12 @@
+__pycache__
+.vscode
+*.swp
+.DS_Store
+.mypy_cache/
+.ipynb_checkpoints
+.idea/
+.coverage
+.mp4
+exp_local
+exp_paper
+outputs

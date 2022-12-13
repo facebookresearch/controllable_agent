@@ -1,0 +1,40 @@
+# for the package:
+numpy
+torch
+torchvision
+hydra-core
+hydra-submitit-launcher
+sklearn
+pandas
+matplotlib
+moviepy
+mujoco_py
+# git+https://github.com/deepmind/dm_control.git@644b3c6844cafd611cb2dfe82bc68bb6aed97292  # past this commit, it breaks
+dm-control==1.0.8  # let's keep it precise for now
+wandb
+tensorboard
+setuptools==59.5.0  # otherwise pytorch bugs, remove when using new pytorch version
+opencv-python
+hiplot
+termcolor
+d4rl
+gym>=0.21,<0.22
+patchelf
+
+# for the demo
+streamlit>=1.11.1
+
+# for development:
+ipdb
+jupyter
+ipython
+types-termcolor
+black==22.3.0
+mypy>=0.931
+pytest>=7.0.1
+pytest-cov>=3.0.0
+flake8>=4.0.1
+pylint>=2.12.2
+tqdm
+nevergrad
+gitpython
