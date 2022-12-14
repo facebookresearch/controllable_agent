@@ -18,6 +18,7 @@ You can request new components by creating an issue
 # os.environ["CUDA_VISIBLE_DEVICES"] = ""  # avoid using CUDA
 import sys
 import time
+import logging
 import tempfile
 from pathlib import Path
 from collections import OrderedDict
@@ -42,6 +43,7 @@ from controllable_agent import runner
 from url_benchmark import goals
 from url_benchmark import utils
 from url_benchmark.video import VideoRecorder
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="Controllable agent - Meta AI",
@@ -103,6 +105,7 @@ recorder.enabled = True
 
 reward = goals.WalkerEquation("x")
 reward._precompute_for_demo(ws)  # precompute before first run
+ws.replay_loader._storage.clear()  # clear memory since not used anymore
 params = list(reward._extract(reward._env))
 params_str = ", ".join(f"`{x}`" for x in params)
 
@@ -118,7 +121,7 @@ last_physics = np.ndarray([])
 if string and string is not None:
     reward = goals.WalkerEquation(string)
     reward._precompute_for_demo(ws)  # loads from cached workspace if already precomputed
-    print(f"Running reward: {string}")  # for the console
+    logger.info(f"Running reward: {string}")  # for the console
     col1.write(f"Running reward `{string}`")  # use code formating to avoid italic from **
     if not reward._precomputed:
         meta = pretrain._init_eval_meta(ws, custom_reward=reward)
@@ -176,15 +179,15 @@ if string and string is not None:
 
 st.write("---")
 st.write(f"""**Note**: multiplicative rewards are a good way to combine constraints on the agent. For instance, `z**4 * exp(-abs(x-5))` makes the agent try to jump around `x=5`""")
-st.write(f"""This agent is far from perfect, and it is still easy to make it fail. For instance, the variable `vz` does not seem to do much. `x**2` produces bad results, presumably because rewards are largest at places that were far from the replay buffer. On the other hand, `x**2 * (x<20) * (x>-20)` works better, because the reward is restricted to a well-explored zone.""")
+st.write(f"""This agent is far from perfect, and it is still easy to make it fail. For instance, the variable `x` works well only in the range well-covered in the trainset (typically -15 to 15). Rewards like `x**2` or `exp(x)` produce bad results, presumably because they are largest far away from the trainset. On the other hand, `x**2 * (x<20) * (x>-20)` works better, because the reward is restricted to a well-explored zone. Also, the variable `vz` does not seem to do much. """)
 
 with st.expander("How Does This Work?"):
-    st.write("""
+    st.write(r"""
 The algorithms are directly taken from our papers (see side bar). At pre-training time, two representations $F(s,a,z)$ and $B(s)$ ("forward" and "backward") were learned, as well as a parametric policy $\pi_z(s)$. Here $z$ is a hidden variable in representation space.
 
 When a new reward function $r$ is set, the app computes the hidden variable $z=\mathbb{E}[r(s)B(s)]$ using 5,000 states $s$ from the training set, using the provided function $r$. Then the policy $\pi_z$ with parameter $z$ is deployed.
 
-The dimension of $F$, $B$ and $z$ is 50. The networks are small multilayer perceptrons. The training set was initialized by a standard exploration algorithm, Random Network Distillation. It is made of 2,000 length-1,000 trajectories. Then we learn $F$, $B$ and $\pi_z$ using the method described in our papers, and we update the training set by sampling random $z$ and applying the corresponding policy. 
+The dimension of $F$, $B$ and $z$ is 50. The networks are small multilayer perceptrons. The training set was initialized by a standard exploration algorithm, Random Network Distillation. It is made of 2,000 length-1,000 trajectories. Then we learn $F$, $B$ and $\pi_z$ using the method described in our papers, and we update the training set by sampling random $z$ and applying the corresponding policy.
 
 For $B$, we only provide a subset of variables from the full state $s$, namely, the six variables `x,z,vx,vz,up,am` mentioned above, to focus training on those. Our theory guarantees that, if the networks minimize the loss well, all reward functions depending on those variables will be optimized.
 
@@ -209,7 +212,7 @@ Our theory guarantees this provides all optimal policies if training is successf
 
 **Theorem.** *Assume the equations above hold. Then the optimal policy for any reward function $r$ can be obtained by evaluating* """)
     st.latex(r''' z=\mathbb{E}[r(s)B(s)] ''')
-    st.write(""" *on states sampled from the training distribution, and applying policy $\pi_z$.*
+    st.write(r""" *on states sampled from the training distribution, and applying policy $\pi_z$.*
 
 *Moreover, approximate solutions still provide approximately optimal policies.*
 
