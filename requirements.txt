@@ -13,7 +13,7 @@ mujoco_py
 dm-control==1.0.8  # let's keep it precise for now
 wandb
 tensorboard
-setuptools==59.5.0  # otherwise pytorch bugs, remove when using new pytorch version
+setuptools>=65.5.1
 opencv-python
 hiplot
 termcolor
