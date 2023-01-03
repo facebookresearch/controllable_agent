@@ -139,7 +139,7 @@ class FlattenJacoObservationWrapper(EnvWrapper):
             assert spec.dtype == np.float64
             assert type(spec) == specs.Array
         dim = np.sum(
-            np.fromiter((np.int(np.prod(spec.shape))  # type: ignore
+            np.fromiter((int(np.prod(spec.shape))  # type: ignore
                          for spec in wrapped_obs_spec.values()), np.int32))
 
         self._obs_spec['observations'] = specs.Array(shape=(dim,),
