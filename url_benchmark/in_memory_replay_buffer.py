@@ -64,7 +64,7 @@ def relabel_episode(env: tp.Any, episode: tp.Dict[str, np.ndarray], goal_func: t
 
 class ReplayBuffer:
     def __init__(self,
-                 max_episodes: int, discount: float, future: float, max_episode_length: tp.Optional[int] = None) -> None:
+                 max_episodes: int, discount: float, future: float) -> None:
         # data_specs: Specs,
         # self._data_specs = tuple(data_specs)
         # self._meta_specs = tuple(meta_specs)
@@ -80,26 +80,9 @@ class ReplayBuffer:
         self._storage: tp.Dict[str, np.ndarray] = collections.defaultdict()
         self._collected_episodes = 0
         self._batch_names = set(field.name for field in dataclasses.fields(ExtendedGoalTimeStep))
-        self._episodes_length = np.zeros(max_episodes, dtype=np.int32)
-        self._episodes_selection_probability = None
-        self._is_fixed_episode_length = True
-        self._max_episode_length = max_episode_length
 
     def __len__(self) -> int:
         return self._max_episodes if self._full else self._idx
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self._backward_compatibility()
-
-    def _backward_compatibility(self):
-        if self._storage and not hasattr(self, '_episodes_length'):
-            self._episodes_length = np.array([len(array) - 1 for array in self._storage["discount"]], dtype=np.int32)
-            self._episodes_length[len(self):] = 0
-            assert self._episodes_length[:len(self)].min() == self._episodes_length[:len(self)].max()
-            self._episodes_selection_probability = None
-            self._is_fixed_episode_length = True
-            self._max_episode_length = None
 
     def add(self, time_step: TimeStep, meta: tp.Mapping[str, np.ndarray]) -> None:
         dtype = np.float32
@@ -116,25 +99,23 @@ class ReplayBuffer:
                 self._batch_names = set(field.name for field in dataclasses.fields(ExtendedGoalTimeStep))
             for name, value_list in self._current_episode.items():
                 values = np.array(value_list, dtype)
+                if name in self._storage and name not in self._batch_names:
+                    if values.shape != self._storage[name].shape[1:]:
+                        logger.warning(f"Reinitializing meta data {name} to 0 since it has changed shapes.")
+                        del self._storage[name]
                 if name not in self._storage:
                     # first iteration, the buffer is created with appropriate size
-                    _shape = values.shape
-                    if self._max_episode_length is not None:
-                        _shape = (self._max_episode_length,) + _shape[1:]
-                    self._storage[name] = np.empty((self._max_episodes,) + _shape, dtype=dtype)
-                self._storage[name][self._idx][:len(values)] = values
-            self._episodes_length[self._idx] = len(self._current_episode['discount']) - 1  # compensate for the dummy transition at the beginning
-            if self._episodes_length[self._idx] != self._episodes_length[self._idx - 1] and self._episodes_length[self._idx - 1] != 0:
-                self._is_fixed_episode_length = False
+                    self._storage[name] = np.empty((self._max_episodes,) + values.shape, dtype=dtype)
+                self._storage[name][self._idx] = values
             self._current_episode = collections.defaultdict(list)
             self._collected_episodes += 1
             self._idx = (self._idx + 1) % self._max_episodes
             self._full = self._full or self._idx == 0
-            self._episodes_selection_probability = None
 
     @property
-    def avg_episode_length(self) -> int:
-        return round(self._episodes_length[:len(self)].mean())
+    def episode_length(self) -> int:
+        data = next(iter(self._storage.values()))  # should be all equal (caution: this is not enforced)
+        return int(data.shape[1] - 1)
 
     def sample(self, batch_size, custom_reward: tp.Optional[tp.Any] = None, with_physics: bool = False) -> EpisodeBatch:
         if not hasattr(self, "_batch_names"):
@@ -142,23 +123,13 @@ class ReplayBuffer:
         if not isinstance(self._future, float):
             assert isinstance(self._future, bool)
             self._future = float(self._future)
-
-        if self._is_fixed_episode_length:
-            ep_idx = np.random.randint(0, len(self), size=batch_size)
-        else:
-            if self._episodes_selection_probability is None:
-                self._episodes_selection_probability = self._episodes_length / self._episodes_length.sum()
-            ep_idx = np.random.choice(np.arange(len(self._episodes_length)), size=batch_size, p=self._episodes_selection_probability)
-
-        eps_lengths = self._episodes_length[ep_idx]
+        ep_idx = np.random.randint(0, len(self), size=batch_size)
         # add +1 for the first dummy transition
-        step_idx = np.random.randint(0, eps_lengths) + 1
-        assert (step_idx <= eps_lengths).all()
+        step_idx = np.random.randint(0, self.episode_length, size=batch_size) + 1
         if self._future < 1:
             # future_idx = step_idx + np.random.randint(0, self.episode_length - step_idx + 1, size=self._batch_size)
             future_idx = step_idx + np.random.geometric(p=(1 - self._future), size=batch_size)
-            future_idx = np.clip(future_idx, 0, eps_lengths)
-            assert (future_idx <= eps_lengths).all()
+            future_idx = np.clip(future_idx, 0, self.episode_length)
         meta = {name: data[ep_idx, step_idx - 1] for name, data in self._storage.items() if name not in self._batch_names}
         obs = self._storage['observation'][ep_idx, step_idx - 1]
         action = self._storage['action'][ep_idx, step_idx]

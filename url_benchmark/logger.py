@@ -28,6 +28,10 @@ COMMON_EVAL_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
                       ('episode_reward', 'R', 'float'),
                       ('total_time', 'T', 'time')]
 
+COMMON_EXP_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
+                       ('episode', 'E', 'int'), ('episode_length', 'L', 'int'),
+                       ('episode_reward', 'R', 'float'),
+                       ('fps', 'FPS', 'float'), ('total_time', 'T', 'time')]
 
 pylogger = logging.getLogger(__name__)
 
@@ -65,6 +69,8 @@ class MetersGroup:
         for key, meter in self._meters.items():
             if key.startswith('train'):
                 key = key[len('train') + 1:]
+            elif key.startswith('explorer'):
+                key = key[len('explorer') + 1:]
             else:
                 key = key[len('eval') + 1:]
             key = key.replace('/', '_')
@@ -153,6 +159,9 @@ class Logger:
         self._eval_mg = MetersGroup(log_dir / 'eval.csv',
                                     formating=COMMON_EVAL_FORMAT,
                                     use_wandb=use_wandb)
+        self._exp_mg = MetersGroup(log_dir / 'explorer.csv',
+                                    formating=COMMON_EXP_FORMAT,
+                                    use_wandb=use_wandb)
         self._sw: tp.Optional[SummaryWriter] = None
         # self.hiplog: tp.Optional[HipLog] = None
         self.use_hiplog = use_hiplog
@@ -167,11 +176,16 @@ class Logger:
             self._sw.add_scalar(key, value, step)
 
     def log(self, key: str, value: tp.Union[float, torch.Tensor], step: int) -> None:
-        assert key.startswith('train') or key.startswith('eval')
+        assert key.startswith('train') or key.startswith('eval') or key.startswith('explorer')
         if isinstance(value, torch.Tensor):
             value = value.item()
         self._try_sw_log(key, value, step)
-        mg = self._train_mg if key.startswith('train') else self._eval_mg
+        if key.startswith('train'):
+            mg = self._train_mg
+        elif key.startswith('explorer'):
+            mg = self._exp_mg
+        else:
+            mg = self._eval_mg
         mg.log(key, value)
         if self.use_hiplog:
             self.hiplog(**{key: value})
@@ -186,6 +200,8 @@ class Logger:
                 self._eval_mg.dump(step, 'eval')
             if ty is None or ty == 'train':
                 self._train_mg.dump(step, 'train')
+            if ty is None or ty == 'explorer':
+                self._exp_mg.dump(step, 'explorer')
         except ValueError as e:
             pylogger.warning(f"Could not dump metrics: {e}")
 

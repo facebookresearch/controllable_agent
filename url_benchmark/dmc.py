@@ -139,7 +139,7 @@ class FlattenJacoObservationWrapper(EnvWrapper):
             assert spec.dtype == np.float64
             assert type(spec) == specs.Array
         dim = np.sum(
-            np.fromiter((int(np.prod(spec.shape))  # type: ignore
+            np.fromiter((np.int(np.prod(spec.shape))  # type: ignore
                          for spec in wrapped_obs_spec.values()), np.int32))
 
         self._obs_spec['observations'] = specs.Array(shape=(dim,),
@@ -331,6 +331,59 @@ class ExtendedTimeStepWrapper(EnvWrapper):
                               discount=time_step.discount or 1.0)
         return super()._augment_time_step(time_step=ts, action=action)
 
+class NoisyObservationWrapper_NormalDist(EnvWrapper):
+    """
+    Adds N(20,5) distributed noise of length _noise_length to observation
+    """
+
+    def __init__(self, env: Env, noise_length=20) -> None:
+        super().__init__(env)
+        self._noise_length = noise_length
+        spec = super().observation_spec()
+        k = "observation"
+        self._obs_spec = specs.Array((spec.shape[0] + self._noise_length,), dtype=np.float32, name=k)
+    def _augment_time_step(self, time_step: TimeStep, action: tp.Optional[np.ndarray] = None) -> TimeStep:
+        obs = time_step.observation
+        org_dtype = obs.dtype
+        noise = np.random.normal(loc=20, scale=5, size=self._noise_length) #np.random.randn(self._noise_length)
+        obs = np.concatenate([obs, noise], axis=0).astype(org_dtype)
+        return time_step._replace(observation=obs)
+
+    def observation_spec(self) -> specs.Array:
+        return self._obs_spec
+
+
+class NoisyObservationWrapper_SinDist(EnvWrapper):
+    """
+    Adds sin(2*pi*f*t) distributed noise of length 1 to observation
+    """
+
+    def __init__(self, env: Env, period=10, amplitude = 100, noise_length=1) -> None:
+        super().__init__(env)
+        self.period = period
+        self.amplitude = amplitude
+        self._noise_length = noise_length
+        self.freq = 1.0 /(self.period * 4)
+        self.phase = np.pi/2
+        spec = super().observation_spec()
+        k = "observation"
+        self._obs_spec = specs.Array((spec.shape[0] + self._noise_length,), dtype=np.float32, name=k)
+        self.t = 0
+    def _augment_time_step(self, time_step: TimeStep, action: tp.Optional[np.ndarray] = None) -> TimeStep:
+        obs = time_step.observation
+        org_dtype = obs.dtype
+        if time_step.step_type == StepType.FIRST:
+            self.t = 0
+        else:
+            self.t +=1
+        curr_t = self.t
+        noise = self.amplitude * np.abs(np.sin(2 * np.pi * self.freq * curr_t + self.phase))
+        obs = np.append(obs, noise).astype(org_dtype)
+        return time_step._replace(observation=obs)
+
+    def observation_spec(self) -> specs.Array:
+        return self._obs_spec
+
 
 def _make_jaco(obs_type, domain, task, frame_stack, action_repeat, seed,
                goal_space: tp.Optional[str] = None, append_goal_to_observation: bool = False
@@ -387,8 +440,10 @@ def _make_dmc(obs_type, domain, task, frame_stack, action_repeat, seed,
 
 def make(
     name: str, obs_type='states', frame_stack=1, action_repeat=1,
-    seed=1, goal_space: tp.Optional[str] = None, append_goal_to_observation: bool = False
+    seed=1, goal_space: tp.Optional[str] = None, append_goal_to_observation: bool = False,
+    add_noise_to_obs: bool = False, type_noise = "sin"
 ) -> EnvWrapper:
+    # type_noise = ["sin", "normal"] with default as "normal" noise
     if append_goal_to_observation and goal_space is None:
         raise ValueError("Cannot append goal space since none is defined")
     assert obs_type in ['states', 'pixels']
@@ -416,6 +471,13 @@ def make(
         env = ExtendedGoalTimeStepWrapper(env)
     else:
         env = ExtendedTimeStepWrapper(env)
+
+    if add_noise_to_obs: # adds noise to the observations
+        if type_noise == "sin":
+            env = NoisyObservationWrapper_SinDist(env)
+        else:
+            env = NoisyObservationWrapper_NormalDist(env)
+
     return env
 
 

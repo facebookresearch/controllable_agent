@@ -522,7 +522,7 @@ class WalkerEquation(BaseReward):
         not_allowed = extract_names(string) - set(variables)
         # keep this safety measure to avoid being hacked in the demo!
         if not_allowed:
-            raise ValueError(f"The following variables are not allowed: {not_allowed}\nPlease only use {variables}")
+            raise ValueError(f"Following variables are not allowed: {not_allowed}\nPlease only use {variables}")
         self.string = string
         self._precomputed: tp.Dict[str, np.ndarray] = {}
 
@@ -572,18 +572,12 @@ class WalkerEquation(BaseReward):
 
     def _from_precomputed(self) -> tp.Dict[str, np.ndarray]:
         variables = dict(self._precomputed)
-        var_name0 = [x for x in variables if not x.startswith("#")][0]
         for name in self._np:
             variables[name] = getattr(np, name)
         rewards = eval(self.string, {}, variables)  # type: ignore
-        if not isinstance(rewards, np.ndarray):
-            rewards = rewards * np.ones_like(variables[var_name0])
         z = self._precomputed["#B"].T.dot(rewards).squeeze()
         if True:  # ASSUMING SCALED
-            norm = float(np.linalg.norm(z))
-            if not norm:
-                norm = 1e-9
-            z *= np.sqrt(z.size) / norm
+            z *= np.sqrt(z.size) / np.linalg.norm(z)
         meta = OrderedDict()
         meta['z'] = z
         return meta

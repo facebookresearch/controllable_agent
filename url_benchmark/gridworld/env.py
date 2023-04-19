@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 from url_benchmark.dmc import ExtendedTimeStep
 
 
-
 class ObservationType(enum.IntEnum):
     STATE_INDEX = enum.auto()
     AGENT_ONEHOT = enum.auto()
@@ -186,6 +185,9 @@ class GridWorld(dm_env.Environment):
     def goal_state(self):
         return self._goal_state
 
+    def set_state(self, x, y):
+        self._state = (y, x)
+
     @goal_state.setter
     def goal_state(self, new_goal):
         if new_goal == self._state or self._layout[new_goal] < 0:
@@ -195,9 +197,6 @@ class GridWorld(dm_env.Environment):
         # Setup new goal location
         self._layout[new_goal] = self._reward_goal
         self._goal_state = new_goal
-
-    def set_state(self, x, y):
-        self._state = (y, x)
 
     def observation_spec(self):
         if self._observation_type is ObservationType.AGENT_ONEHOT:
@@ -364,7 +363,7 @@ class GridWorld(dm_env.Environment):
             self._state[1],
             self._state[0],
             u'😃',
-            fontname='symbola',
+            # fontname='symbola',
             fontsize=18,
             ha='center',
             va='center',
@@ -397,4 +396,3 @@ class GridWorld(dm_env.Environment):
     def plot_greedy_policy(self, q):
         greedy_actions = np.argmax(q, axis=2)
         self.plot_policy(greedy_actions)
-

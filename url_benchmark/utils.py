@@ -46,6 +46,41 @@ class eval_mode:
         for model, state in zip(self.models, self.prev_states):
             model.train(state)
 
+class EMA_STD:
+    "Exponential moving average estimate class"
+
+    def __init__(self, device, tau=0.99, eps=1e-8) -> None:
+        self.mean = torch.zeros((1,)).to(device)
+        self.mean_square = torch.zeros((1,)).to(device)
+        self.counter = 0
+        self.tau = tau
+        self.eps = eps
+    def __call__(self, x):
+        m = x.mean()
+        sm = x.pow(2).mean()
+        self.mean = self.tau * self.mean + (1-self.tau) * m
+        self.mean_square = self.tau * self.mean_square + (1- self.tau) * sm
+        self.counter += 1
+        ema_mean = self.mean / (1 - self.tau**self.counter)
+        ema_mean_square = self.mean_square / (1 - self.tau**self.counter)
+        std = torch.sqrt(max(ema_mean_square - ema_mean**2, 0) + self.eps)
+        return std
+
+class EMA:
+    "Exponential moving average of metrics"
+    def __init__(self, tau=0.99) -> None:
+        self.target = None
+        self.tau = tau
+    def __call__(self, x):
+        if self.target is None:
+            self.target = x
+        else:
+            self.target = self.tau * self.target + (1-self.tau) * x
+        return self.target
+
+
+def ema_metrics(x, target_x, tau=0.99) -> tp.Any:
+    return tau * target_x + (1 - tau) * x
 
 def set_seed_everywhere(seed: int) -> None:
     torch.manual_seed(seed)

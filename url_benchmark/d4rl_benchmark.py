@@ -16,10 +16,7 @@ from url_benchmark.in_memory_replay_buffer import ReplayBuffer
 from dm_env import specs, StepType
 from dm_env.auto_reset_environment import AutoResetEnvironment
 
-@dataclasses.dataclass
-class D4RLConfig:
-    minimum_episode_length: tp.Optional[int] = None
-    ignore_terminals: bool = False
+# from dm_env import specs
 
 class EmptyPhysics():
     def __init__(self) :
@@ -76,47 +73,33 @@ class D4RLWrapper(AutoResetEnvironment):
         return self._env.get_dataset()
 
 class D4RLReplayBufferBuilder:
+    def padding_episode(self, replay_storage: ReplayBuffer, longest_episode: int, time_step: TimeStep, meta: MetaDict, final_discount: int):
+        while True:
+            current_episode_length = len(replay_storage._current_episode['discount'])
+            if current_episode_length + 1 == longest_episode:
+                time_step.step_type = StepType.LAST
+                time_step.discount = final_discount
+                replay_storage.add(time_step, meta)
+                break
+            else:
+                replay_storage.add(time_step, meta)
 
-    def filter_dataset_by_episode_length(self, dataset: tp.Any, minimum_episode_length: tp.Optional[int]):
-        if minimum_episode_length is None or minimum_episode_length <= 1:
-            return dataset
-        end_indices = (dataset["terminals"] + dataset["timeouts"]).nonzero()[0]
-        episode_lengths = np.diff(np.concatenate(([-1], end_indices)))
-
-        episode_lengths_expanded = episode_lengths.repeat(episode_lengths)
-        diff_len = dataset['observations'].shape[0] - len(episode_lengths_expanded)
-        assert diff_len >= 0 # there is no guarantee that last step in the data step is last step in an episode
-        episode_lengths_expanded = np.concatenate((episode_lengths_expanded, np.zeros(diff_len, dtype=int))) # ignore last steps if they do not belong to an episode
-        filter_indices = episode_lengths_expanded >= minimum_episode_length
-        dataset_size = len(dataset["observations"])
-        for key, values in dataset.items():
-            if isinstance(values, np.ndarray) and len(values) == dataset_size:
-                dataset[key] = values[filter_indices] 
-
-        return dataset
-    
     def prepare_replay_buffer_d4rl(self, env: EnvWrapper, meta: MetaDict, cfg: tp.Any) -> ReplayBuffer:
         dataset = env.base_env.get_dataset()
-        dataset = self.filter_dataset_by_episode_length(dataset, cfg.d4rl_config.minimum_episode_length)
         # please note we can use d4rl.qlearning_dataset instead, but termination conditions are not calculated as expected only consider (terminals)
         # last next_obs, I used first obs (I see they neglect it at qlearning_dataset, but this will result that last episode will not be terminiated, however we can fake it)
         observations = dataset['observations']
         actions = dataset['actions']
         rewards = dataset['rewards']
-        is_ignore_terminals = cfg.d4rl_config and (cfg.d4rl_config.ignore_terminals)
-        terminals = np.zeros_like(dataset['terminals']) if is_ignore_terminals else dataset['terminals']
+        terminals = dataset['terminals']
         timeouts = dataset['timeouts']
         end_indices = (terminals + timeouts).nonzero()[0]
-        episode_lengths = np.diff(np.concatenate(([-1], end_indices)))
-
-        max_episode_length = episode_lengths.max()
-        if not cfg.d4rl_config or cfg.d4rl_config.minimum_episode_length is None:
-            assert (episode_lengths==1).sum()==0
-        else:
-            assert (episode_lengths<cfg.d4rl_config.minimum_episode_length).sum()==0 
-        replay_storage = ReplayBuffer(max_episodes=len(end_indices), discount=cfg.discount, future=cfg.future, max_episode_length=max_episode_length)
+        episode_lengths = np.diff(np.concatenate(([0], end_indices)))
+        assert (episode_lengths==1).sum()==0
+        longest_episode = episode_lengths.max()
+        replay_storage = ReplayBuffer(max_episodes=len(end_indices), discount=cfg.discount, future=cfg.future)
         first = True
-        dataset_len = dataset['rewards'].shape[0]
+        dataset_len = dataset['rewards'].shape[0] 
         for idx in range(dataset_len):
             if first:
                 time_step = ExtendedTimeStep(
@@ -127,15 +110,12 @@ class D4RLReplayBufferBuilder:
                     step_type = StepType.MID, observation=observations[idx], reward=rewards[idx-1], discount=1, action=actions[idx-1])
             
             if terminals[idx] or timeouts[idx]:
+                assert not first
                 first = True
                 final_discount = 1
                 if terminals[idx]:
                     final_discount = 0
-                time_step.step_type = StepType.LAST
-                time_step.discount = final_discount
-
-            replay_storage.add(time_step, meta)
-        assert (episode_lengths-1 == replay_storage._episodes_length).all()
-        if episode_lengths.min()!=episode_lengths.max():
-            assert not replay_storage._is_fixed_episode_length 
-        return replay_storage        
+                self.padding_episode(replay_storage, longest_episode, time_step, meta, final_discount) # padding to not break the fixed episode length contract
+            else:
+                replay_storage.add(time_step, meta)
+        return replay_storage

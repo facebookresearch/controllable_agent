@@ -164,7 +164,7 @@ class Critic(nn.Module):
 class DDPGAgent:
     # pylint: disable=unused-argument
     def __init__(self, meta_dim: int = 0, **kwargs: tp.Any) -> None:
-        if self.__class__.__name__.startswith(("DIAYN", "APS", "RND", "Proto", "ICMAPT", "MaxEnt")):  # HACK
+        if self.__class__.__name__.startswith(("DIAYN", "APS", "RND", "Proto", "ICMAPT", "MaxEnt", "Exploration")):  # HACK
             cfg_fields = {field.name for field in dataclasses.fields(DDPGAgentConfig)}
             # those have their own config, so lets curate the fields
             # others will need to be ported in time

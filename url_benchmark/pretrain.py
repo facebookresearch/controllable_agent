@@ -36,11 +36,16 @@ from url_benchmark.logger import Logger
 from url_benchmark.in_memory_replay_buffer import ReplayBuffer
 from url_benchmark.video import TrainVideoRecorder, VideoRecorder
 from url_benchmark import agent as agents
+from url_benchmark.agent.exploration import ExplorationAgent
+from url_benchmark.agent.exploration_rnd import RNDAgent
 from url_benchmark.d4rl_benchmark import D4RLReplayBufferBuilder, D4RLWrapper
 from url_benchmark.gridworld.env import build_gridworld_task
 
 logger = logging.getLogger(__name__)
 torch.backends.cudnn.benchmark = True
+import warnings
+warnings.simplefilter("ignore", DeprecationWarning)
+
 # os.environ['WANDB_MODE']='offline'
 
 # from url_benchmark.dmc_benchmark import PRIMAL_TASKS
@@ -56,7 +61,7 @@ class Config:
     device: str = "cuda"
     save_video: bool = False
     use_tb: bool = False
-    use_wandb: bool = False
+    use_wandb: bool = True
     use_hiplog: bool = False
     # experiment
     experiment: str = "online"
@@ -70,20 +75,47 @@ class Config:
     goal_space: tp.Optional[str] = None
     append_goal_to_observation: bool = False
     # eval
-    num_eval_episodes: int = 10
+    num_eval_episodes: int = 1
     custom_reward: tp.Optional[str] = None  # activates custom eval if not None
+    custom_reward_maze: tp.Optional[str] = None  # activates custom eval if not None
+    custom_reward_walker: tp.Optional[str] = None  # activates custom reward for walker yoga if not None
+    custom_reward_mujoco: tp.Optional[str] = None
     final_tests: int = 10
     # checkpoint
     snapshot_at: tp.Tuple[int, ...] = (100000, 200000, 500000, 800000, 1000000, 1500000,
                                        2000000, 3000000, 4000000, 5000000, 9000000, 10000000)
     checkpoint_every: int = 100000
+
     load_model: tp.Optional[str] = None
     # training
-    num_seed_frames: int = 4000
-    replay_buffer_episodes: int = 5000
+    num_seed_frames: int = 10000
+    replay_buffer_episodes: int = 10000
     update_encoder: bool = True
     batch_size: int = omgcf.II("agent.batch_size")
-
+    # exploration
+    explore: bool = False
+    wandb_end_name: str = "exp"
+    set_epsilon_exploration: str = False
+    epsilon_explore_val: float = 0.5
+    num_seed_episodes_explore: int = 30
+    # separate agent which collects sample for online training based on intrinsic reward
+    separate_exploratory_agent: bool = True
+    update_exploratory_agent_every_steps: int = 5
+    update_cov_steps : int = 500
+    exp_cov_F: bool = False
+    exp_cov_B: bool = False
+    exp_cov_FB: bool = False
+    intr_reward_FBloss: bool = True
+    reward_prioritization: bool = False
+    ema_intr_reward: bool = False # exponential moving average of cov/FB loss function
+    explore_rnd: bool = False
+    # random exploration after every 500 episodes for 10 episodes
+    uniform_explore_after_few_episodes: bool = False
+    compute_worst_z_FB_loss: bool = False
+    add_state_noise: bool = False
+    # adds noise to the observation
+    add_noise_to_obs: bool = False
+    type_noise: str = "sin" # type of noise = "normal"/ "sin"
 
 @dataclasses.dataclass
 class PretrainConfig(Config):
@@ -94,6 +126,9 @@ class PretrainConfig(Config):
     # snapshot
     eval_every_frames: int = 10000
     load_replay_buffer: tp.Optional[str] = None
+    # exploration
+    explore_every_frames: int = 4000
+
     # replay buffer
     # replay_buffer_num_workers: int = 4
     # nstep: int = omgcf.II("agent.nstep")
@@ -110,13 +145,15 @@ ConfigStore.instance().store(name="workspace_config", node=PretrainConfig)
 
 
 def make_agent(
-    obs_type: str, obs_spec, action_spec, num_expl_steps: int, cfg: omgcf.DictConfig
-) -> tp.Union[agents.FBDDPGAgent, agents.DDPGAgent]:
+    obs_type: str, obs_shape, action_shape, num_expl_steps: int, cfg: omgcf.DictConfig, explore = False
+) -> tp.Union[agents.FBDDPGAgent, agents.DDPGAgent, agents.DiscreteFBAgent]:
     cfg.obs_type = obs_type
-    cfg.obs_shape = obs_spec.shape
-    cfg.action_shape = (action_spec.num_values, ) if isinstance(action_spec, specs.DiscreteArray) \
-        else action_spec.shape
+    cfg.obs_shape = obs_shape
+    cfg.action_shape = action_shape
     cfg.num_expl_steps = num_expl_steps
+    if explore:
+        cfg.reward_free = False # building intrinsic reward
+        cfg.update_every_steps = 1
     return hydra.utils.instantiate(cfg)
 
 
@@ -155,6 +192,7 @@ def _init_eval_meta(workspace: "BaseWorkspace", custom_reward: tp.Optional[_goal
     if not isinstance(ag, special) or not len(workspace.replay_loader):
         return workspace.agent.init_meta()
     if custom_reward is not None:
+        # print("custom reward not none!")
         try:  # if the custom reward implements a goal, return it
             goal = custom_reward.get_goal(workspace.cfg.goal_space)
             return workspace.agent.get_goal_meta(goal)
@@ -162,17 +200,25 @@ def _init_eval_meta(workspace: "BaseWorkspace", custom_reward: tp.Optional[_goal
             pass
         if not isinstance(workspace.agent, agents.SFSVDAgent):
             # we cannot fully type because of the FBBDPG string check :s
-            num_steps = workspace.agent.cfg.num_inference_steps  # type: ignore
-            obs_list, reward_list = [], []
-            batch_size = 0
-            while batch_size < num_steps:
-                batch = workspace.replay_loader.sample(workspace.cfg.batch_size, custom_reward=custom_reward)
-                batch = batch.to(workspace.cfg.device)
-                obs_list.append(batch.next_goal if workspace.cfg.goal_space is not None else batch.next_obs)
-                reward_list.append(batch.reward)
-                batch_size += batch.next_obs.size(0)
-            obs, reward = torch.cat(obs_list, 0), torch.cat(reward_list, 0)  # type: ignore
-            obs_t, reward_t = obs[:num_steps], reward[:num_steps]
+            num_steps = min (workspace.agent.cfg.num_inference_steps,
+                             len(workspace.replay_loader) * workspace.replay_loader.episode_length)  # type: ignore
+            batch = workspace.replay_loader.sample(num_steps, custom_reward=custom_reward)
+            batch = batch.to(workspace.cfg.device)
+            if workspace.cfg.goal_space is not None:
+                obs_t = batch.next_goal
+            else:
+                obs_t = batch.next_obs
+            reward_t = batch.reward
+            # obs_list, reward_list = [], []
+            # batch_size = 0
+            # while batch_size < num_steps:
+            #     batch = workspace.replay_loader.sample(workspace.cfg.batch_size, custom_reward=custom_reward)
+            #     batch = batch.to(workspace.cfg.device)
+            #     obs_list.append(batch.next_goal if workspace.cfg.goal_space is not None else batch.next_obs)
+            #     reward_list.append(batch.reward)
+            #     batch_size += batch.next_obs.size(0)
+            # obs, reward = torch.cat(obs_list, 0), torch.cat(reward_list, 0)  # type: ignore
+            # obs_t, reward_t = obs[:num_steps], reward[:num_steps]
             # phy = workspace.replay_loader._storage["physics"]
             # phy = phy.reshape(-1, phy.shape[-1])
             # back_input = "observation" if workspace.cfg.goal_space is None else "goal"
@@ -238,11 +284,37 @@ class BaseWorkspace(tp.Generic[C]):
         self.train_env = self._make_env()
         self.eval_env = self._make_env()
         # create agent
-        self.agent = make_agent(cfg.obs_type,
-                                self.train_env.observation_spec(),
-                                self.train_env.action_spec(),
-                                cfg.num_seed_frames // cfg.action_repeat,
-                                cfg.agent)
+        obs_type = cfg.obs_type
+        obs_shape = self.train_env.observation_spec().shape
+        if isinstance(self.train_env.action_spec(), specs.DiscreteArray):
+            action_shape = (self.train_env.action_spec().num_values,)
+        else:
+            action_shape = self.train_env.action_spec().shape
+        num_expl_steps = cfg.num_seed_frames // cfg.action_repeat
+        self.agent = make_agent( obs_type= obs_type,
+                                 obs_shape = obs_shape,
+                                 action_shape= action_shape,
+                                 num_expl_steps = num_expl_steps,
+                                 cfg = cfg.agent)
+        # In both optimisation and exploration use worst_z if set True
+        self.agent.cfg.worst_z_FB_update = self.cfg.compute_worst_z_FB_loss
+
+        if cfg.explore and cfg.explore_rnd:
+            # RND exploration (FB representation agnostic exploration)
+            self.rnd_exploratory_agent = RNDAgent(obs_type, self.agent.obs_dim, self.agent.action_dim, self.agent.cfg)
+        else:
+            self.rnd_exploratory_agent = None
+
+        if cfg.explore and cfg.separate_exploratory_agent and not cfg.explore_rnd:
+            # a separate agent to explore the env and gather data bsed on intrinsic reward
+            self.exploratory_agent = ExplorationAgent(obs_type,self.agent.obs_dim,
+                                                      self.agent.action_dim, self.agent.cfg, cfg.exp_cov_F,
+                                                      cfg.exp_cov_B, cfg.exp_cov_FB, cfg.intr_reward_FBloss,
+                                                      cfg.compute_worst_z_FB_loss,
+                                                      cfg.ema_intr_reward, cfg.reward_prioritization, self.agent)
+        else:
+            self.exploratory_agent = None
+
 
         # create logger
         self.logger = Logger(self.work_dir,
@@ -252,7 +324,7 @@ class BaseWorkspace(tp.Generic[C]):
 
         if cfg.use_wandb:
             exp_name = '_'.join([
-                cfg.experiment, cfg.agent.name, self.domain
+                cfg.experiment, cfg.agent.name, self.domain, cfg.wandb_end_name
             ])
             wandb.init(project="controllable_agent", group=cfg.agent.name, name=exp_name,  # mode="disabled",
                        config=omgcf.OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True))  # type: ignore
@@ -322,7 +394,13 @@ class BaseWorkspace(tp.Generic[C]):
             import gym
             return dmc.EnvWrapper(D4RLWrapper(gym.make(self.cfg.task.split('_')[1])))
         return dmc.make(cfg.task, cfg.obs_type, cfg.frame_stack, cfg.action_repeat, cfg.seed,
-                        goal_space=cfg.goal_space, append_goal_to_observation=cfg.append_goal_to_observation)
+                        goal_space=cfg.goal_space, append_goal_to_observation=cfg.append_goal_to_observation,
+                        add_noise_to_obs= cfg.add_noise_to_obs, type_noise=cfg.type_noise)
+
+    def _make_eval_env(self, task, seed) -> dmc.EnvWrapper:
+        return dmc.make(task, self.cfg.obs_type, self.cfg.frame_stack, self.cfg.action_repeat, seed,
+                        goal_space=self.cfg.goal_space, append_goal_to_observation=self.cfg.append_goal_to_observation,
+                        add_noise_to_obs= self.cfg.add_noise_to_obs, type_noise=self.cfg.type_noise)
 
     @property
     def global_frame(self) -> int:
@@ -335,6 +413,42 @@ class BaseWorkspace(tp.Generic[C]):
         if self.cfg.custom_reward is None:
             return None
         return _goals.get_reward_function(self.cfg.custom_reward, seed)
+
+    # def eval_grid_goals(self) -> None:
+    #     step, episode = 0, 0
+    #     eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
+    #     rewards: tp.List[float] = []
+    #     while eval_until_episode(episode):
+    #         time_step = self.eval_env.reset()
+    #         # create custom reward if need be (if field exists)
+    #         meta = self.agent.get_goal_meta(self.eval_env.get_goal_obs())
+    #         total_reward = 0.0
+    #         self.video_recorder.init(self.eval_env, enabled=(episode == 0))
+    #         while not time_step.last():
+    #             with torch.no_grad(), utils.eval_mode(self.agent):
+    #                 action = self.agent.act(time_step.observation,
+    #                                         meta,
+    #                                         self.global_step,
+    #                                         eval_mode=True)
+    #             time_step = self.eval_env.step(action)
+    #             self.video_recorder.record(self.eval_env)
+    #             # for legacy reasons, we need to check the name :s
+    #             total_reward += time_step.reward
+    #             step += 1
+    #         print("gridworld reward:", total_reward)
+    #         rewards.append(total_reward)
+    #         episode += 1
+    #         self.video_recorder.save(f'{self.global_frame}.mp4')
+    #
+    #     self.eval_rewards_history.append(float(np.mean(rewards)))
+    #     with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
+    #         log('episode_reward', self.eval_rewards_history[-1])
+    #         if len(rewards) > 1:
+    #             log('episode_reward#std', float(np.std(rewards)))
+    #         log('episode_length', step * self.cfg.action_repeat / episode)
+    #         log('episode', self.global_episode)
+    #         log('step', self.global_step)
+
 
     def eval_maze_goals(self) -> None:
         if isinstance(self.agent, (agents.SFAgent, agents.SFSVDAgent, agents.NEWAPSAgent)) and len(self.replay_loader) > 0:
@@ -363,7 +477,7 @@ class BaseWorkspace(tp.Generic[C]):
                 goal_rewards.append(episode_reward)
                 goal_distances.append(distance)
                 self.video_recorder.save(f'{g}.mp4')
-            print(f"goal: {g}, avg_reward: {round(float(np.mean(goal_rewards)), 2)}, avg_distance: {round(float(np.mean(goal_distances)), 5)}")
+            # print(f"goal: {g}, avg_reward: {round(float(np.mean(goal_rewards)), 2)}, avg_distance: {round(float(np.mean(goal_distances)), 5)}")
             rewards.append(float(np.mean(goal_rewards)))
         self.eval_rewards_history.append(float(np.mean(rewards)))
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
@@ -415,6 +529,7 @@ class BaseWorkspace(tp.Generic[C]):
             rewards.append(total_reward)
             episode += 1
             self.video_recorder.save(f'{self.global_frame}.mp4')
+            # print("eval goal:", self.eval_env.goal_state, " reward:", total_reward, " obs:", time_step.observation)
 
         self.eval_rewards_history.append(float(np.mean(rewards)))
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
@@ -433,6 +548,31 @@ class BaseWorkspace(tp.Generic[C]):
                 log('z_norm', np.linalg.norm(meta['z']).item())
             for key, val in physics_agg.dump():
                 log(key, val)
+
+
+    def eval_env_with_task(self, eval_env, task, seed, num_eval_episodes=1):
+        episode = 0
+        eval_until_episode = utils.Until(num_eval_episodes)
+        rewards: tp.List[float] = []
+        while eval_until_episode(episode):
+            time_step = eval_env.reset()
+            # create custom reward if need be (if field exists)
+            custom_reward = _goals.get_reward_function(task, seed)
+            # pdb.set_trace()
+            meta = _init_eval_meta(self, custom_reward)
+            total_reward = 0.0
+            while not time_step.last():
+                with torch.no_grad(), utils.eval_mode(self.agent):
+                    action = self.agent.act(time_step.observation,
+                                            meta,
+                                            self.global_step,
+                                            eval_mode=True)
+                time_step = eval_env.step(action)
+                total_reward += custom_reward.from_env(eval_env)
+            rewards.append(total_reward)
+            episode += 1
+        return float(np.mean(rewards))
+
 
     _CHECKPOINTED_KEYS = ('agent', 'global_step', 'global_episode', "replay_loader")
 
@@ -533,6 +673,32 @@ class BaseWorkspace(tp.Generic[C]):
             json.dump(rewards, f)
 
 
+    def eval_mlt_tasks(self) -> None:
+        domain_tasks = {
+            "cheetah": ['walk', 'walk_backward', 'run', 'run_backward'],
+            "quadruped": ['stand', 'walk', 'run', 'jump'],
+            "walker": ['stand', 'walk', 'run', 'flip'],
+        }
+        if self.domain not in domain_tasks:
+            return
+        rewards = {}
+        seed=10
+        for name in domain_tasks[self.domain]:
+            task = "_".join([self.domain, name])
+            # print("task:", task)
+            seed += 1  # for the sake of avoiding similar seeds
+            eval_env = self._make_eval_env(task, seed)
+            rewards[task] = self.eval_env_with_task(eval_env, task, seed, self.cfg.num_eval_episodes)
+
+        avg_task_reward = float(np.mean([rewards[task] for task in rewards.keys()]))
+        with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
+            for task in rewards.keys():
+                log(f'{task}_reward', rewards[task])
+            log(f'avg_reward', avg_task_reward)
+            log(f'step', self.global_step)
+            log(f'episode', self.global_episode)
+
+
 class Workspace(BaseWorkspace[PretrainConfig]):
     def __init__(self, cfg: PretrainConfig) -> None:
         super().__init__(cfg)
@@ -564,6 +730,9 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                                       self.cfg.action_repeat)
         eval_every_step = utils.Every(self.cfg.eval_every_frames,
                                       self.cfg.action_repeat)
+        explore_every_step = utils.Until(self.cfg.explore_every_frames,
+                                      self.cfg.action_repeat)
+
         # if self.cfg.custom_reward is not None:
         #     raise NotImplementedError("Custom reward not implemented in pretrain.py train loop (see anytrain.py)")
 
@@ -640,6 +809,7 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                     metrics = self.agent.update(self.replay_loader, self.global_step, self.reward_cls)
                 else:
                     metrics = self.agent.update(self.replay_loader, self.global_step)
+                self.agent.update_target_net()
                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
 
             # take env step

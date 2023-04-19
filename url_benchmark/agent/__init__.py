@@ -6,6 +6,7 @@
 from .ddpg import DDPGAgent as DDPGAgent
 from .ddpg import DDPGAgentConfig as DDPGAgentConfig
 from .fb_ddpg import FBDDPGAgent as FBDDPGAgent
+from .discrete_fb import DiscreteFBAgent as DiscreteFBAgent
 from .aps import APSAgent as APSAgent
 from .ddpg import MetaDict as MetaDict
 # register agents for hydra
@@ -21,5 +22,6 @@ from .sf_svd import SFSVDAgent
 from .new_aps import NEWAPSAgent
 from .goal_sm import GoalSMAgent
 from .max_ent import MaxEntAgent
+from .exploration import ExplorationAgent
 from .uvf import UVFAgent
 from .discrete_fb import DiscreteFBAgent

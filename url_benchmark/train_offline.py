@@ -18,7 +18,7 @@ import torch
 from url_benchmark import goals as _goals
 from url_benchmark import utils
 from url_benchmark.in_memory_replay_buffer import ReplayBuffer # pylint: disable=unused-import
-from url_benchmark.replay_buffer import EpisodeBatch # pylint: disable=unused-import
+from url_benchmark.replay_buffer import EpisodeBatch
 from url_benchmark import agent as agents
 
 logger = logging.getLogger(__name__)

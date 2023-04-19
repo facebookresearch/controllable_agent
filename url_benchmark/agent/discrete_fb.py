@@ -2,7 +2,6 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-
 # pylint: disable=unused-import
 import pdb
 import copy
@@ -381,15 +380,20 @@ class DiscreteFBAgent:
         return metrics
 
 
+    def update_target_net(self):
+        # update critic target for both forward and backward net
+        utils.soft_update_params(self.forward_net, self.forward_target_net,
+                                 self.cfg.fb_target_tau)
+        utils.soft_update_params(self.backward_net, self.backward_target_net,
+                                 self.cfg.fb_target_tau)
+
+
     def aug_and_encode(self, obs: torch.Tensor) -> torch.Tensor:
         obs = self.aug(obs)
         return self.encoder(obs)
 
     def update(self, replay_loader: ReplayBuffer, step: int) -> tp.Dict[str, float]:
         metrics: tp.Dict[str, float] = {}
-
-        if step % self.cfg.update_every_steps != 0:
-            return metrics
 
         batch = replay_loader.sample(self.cfg.batch_size)
         batch = batch.to(self.cfg.device)
@@ -455,14 +459,9 @@ class DiscreteFBAgent:
                                       next_obs=next_obs, next_goal=next_goal, z=z, step=step))
 
         # update critic target
-        utils.soft_update_params(self.forward_net, self.forward_target_net,
-                                 self.cfg.fb_target_tau)
-        utils.soft_update_params(self.backward_net, self.backward_target_net,
-                                 self.cfg.fb_target_tau)
+        # utils.soft_update_params(self.forward_net, self.forward_target_net,
+        #                          self.cfg.fb_target_tau)
+        # utils.soft_update_params(self.backward_net, self.backward_target_net,
+        #                          self.cfg.fb_target_tau)
 
         return metrics
-
-
-
-
-

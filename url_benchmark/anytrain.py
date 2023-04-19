@@ -18,7 +18,7 @@ import torch
 from url_benchmark import dmc
 from url_benchmark import utils
 from url_benchmark import agent as agents
-from url_benchmark.d4rl_benchmark import D4RLConfig, D4RLReplayBufferBuilder
+from url_benchmark.d4rl_benchmark import D4RLReplayBufferBuilder
 from url_benchmark.video import TrainVideoRecorder
 
 logger = logging.getLogger(__name__)
@@ -40,9 +40,9 @@ class AnytrainConfig(pretrain.Config):
     # mode
     reward_free: bool = True
     # train settings
-    num_train_episodes: int = 2000
+    num_train_episodes: int = 10000
     # snapshot
-    eval_every_episodes: int = 10
+    eval_every_episodes: int = 1
     load_replay_buffer: tp.Optional[str] = None
     # replay buffer
     # replay_buffer_num_workers: int = 4
@@ -50,8 +50,10 @@ class AnytrainConfig(pretrain.Config):
     # misc
     save_train_video: bool = False
     update_replay_buffer: bool = True
-    num_total_updates: tp.Optional[int] = None
-    d4rl_config: D4RLConfig = dataclasses.field(default_factory=D4RLConfig)
+    # exploration
+    num_episode_replay_buffer: int = 2  # num of episodes for current z to play traj for to update replay buffer
+    run_exploration_policy_after_steps: int = 10000
+
 
 ConfigStore.instance().store(name="workspace_config", node=AnytrainConfig)
 
@@ -60,7 +62,8 @@ class Workspace(pretrain.BaseWorkspace[AnytrainConfig]):
     def __init__(self, cfg: AnytrainConfig) -> None:
         super().__init__(cfg)
         self.train_video_recorder = TrainVideoRecorder(self.work_dir if cfg.save_train_video else None,
-                                                       camera_id=self.video_recorder.camera_id, use_wandb=self.cfg.use_wandb)
+                                                       camera_id=self.video_recorder.camera_id,
+                                                       use_wandb=self.cfg.use_wandb)
         self._last_processed_step = 0  # for checkpointing
         if not cfg.update_replay_buffer:
             cfg.num_seed_frames = -1
@@ -84,9 +87,15 @@ class Workspace(pretrain.BaseWorkspace[AnytrainConfig]):
         episode_reward = 0.0
         z_correl = 0.0
         physics_agg = dmc.PhysicsAggregator()
-        custom_reward = self._make_custom_reward(seed=self.global_step)
+        # custom_reward = self._make_custom_reward(seed=self.global_step)
         while not time_step.last():
+
+            # generating z only for exploration, not for saving z in replay buffer
+            if self.cfg.explore and isinstance(self.agent,
+                                               agents.FBDDPGAgent) and self.cfg.run_exploration_policy_after_steps < self.global_step:
+                self.agent.set_exploration()
             meta = self.agent.update_meta(meta, self.global_step, time_step, replay_loader=self.replay_loader)
+
             with torch.no_grad(), utils.eval_mode(self.agent):
                 action = self.agent.act(time_step.observation,
                                         meta,
@@ -94,8 +103,8 @@ class Workspace(pretrain.BaseWorkspace[AnytrainConfig]):
                                         eval_mode=False)
 
             time_step = self.train_env.step(action)
-            if custom_reward is not None:
-                time_step.reward = custom_reward.from_env(self.train_env)
+            # if custom_reward is not None:
+            #     time_step.reward = custom_reward.from_env(self.train_env)
             physics_agg.add(self.train_env)
             episode_reward += time_step.reward
             self.replay_loader.add(time_step, meta)
@@ -104,6 +113,7 @@ class Workspace(pretrain.BaseWorkspace[AnytrainConfig]):
                 z_correl += self.agent.compute_z_correl(time_step, meta)
             episode_step += 1
             self.global_step += 1
+
         # log episode stats
         if log_metrics:
             self.train_video_recorder.save(f'{self.global_frame}.mp4')
@@ -134,15 +144,14 @@ class Workspace(pretrain.BaseWorkspace[AnytrainConfig]):
         metrics: tp.Optional[tp.Dict[str, float]] = None
         last_step = 0
         while self.global_episode < self.cfg.num_train_episodes:
-            # play 1 episode
+            # play num_episode_replay_buffer episode
             if self.cfg.update_replay_buffer:
-                self._play_episode(log_metrics=metrics is not None)  # logging requires all metrics available
+                for _ in range(self.cfg.num_episode_replay_buffer):
+                    self._play_episode(log_metrics=metrics is not None)  # logging requires all metrics available
+                    self.global_episode += 1
             else:
-                global_step_update = self.replay_loader.avg_episode_length
-                if self.cfg.num_total_updates is not None:
-                    global_step_update = self.cfg.num_total_updates // self.cfg.num_train_episodes
-                self.global_step += global_step_update
-            self.global_episode += 1
+                self.global_step += self.replay_loader.episode_length
+                self.global_episode += 1
             # update the agent
             if self.global_frame > self.cfg.num_seed_frames:
                 # TODO: reward_free should be handled in the agent update itself !
@@ -155,7 +164,11 @@ class Workspace(pretrain.BaseWorkspace[AnytrainConfig]):
             if not self.global_episode % self.cfg.eval_every_episodes:
                 self.logger.log('eval_total_time', self.timer.total_time(),
                                 self.global_frame)
-                self.eval()
+                if self.cfg.custom_reward == "maze_multi_goal":
+                    self.eval_maze_goals()
+                else:
+                    self.eval()
+                print("eval done at episode ", self.global_episode)
             if self.cfg.use_hiplog and self.logger.hiplog.content:
                 self.logger.hiplog.write()  # write to hiplog only once per episode
             # checkpoint
